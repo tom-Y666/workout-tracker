@@ -1,6 +1,9 @@
 # Secrets（絶対にGitに含めない）
 .streamlit/secrets.toml
 
+# 開発メモ
+CLAUDE_MEMO.md
+
 # データファイル（ユーザー情報・記録はGit管理しない）
 users.json
 workouts.json
