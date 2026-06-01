@@ -1,0 +1,18 @@
+# Secrets（絶対にGitに含めない）
+.streamlit/secrets.toml
+
+# データファイル（ユーザー情報・記録はGit管理しない）
+users.json
+workouts.json
+exercises.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
