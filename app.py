@@ -1,10 +1,14 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import plotly.express as px
 from datetime import date
+import time
 
 import auth
 import data
+
+IDLE_TIMEOUT = 30 * 60  # 30分（秒）
 
 st.set_page_config(page_title="筋トレ記録", page_icon="💪", layout="wide")
 
@@ -38,6 +42,7 @@ def show_login():
                 if ok:
                     st.session_state.logged_in = True
                     st.session_state.username = username
+                    data.init_default_exercises(username)  # 種目が0件ならテンプレートから初期投入
                     st.rerun()
                 else:
                     st.error(msg)
@@ -53,25 +58,43 @@ def _clear_rec_widget_keys():
             del st.session_state[k]
 
 
+def _set_shadow(i: int, j: int, w, r):
+    """shadowストレージに値を保存（Streamlitに削除されない通常のdict）。"""
+    st.session_state.setdefault("rec_shadow", {})[f"{i}_{j}"] = {"w": w, "r": r}
+
+
 def _init_rec_state(username: str, date_str: str):
     _clear_rec_widget_keys()
+    st.session_state.rec_shadow = {}
+    ex_defs = data.get_exercises(username)
+    ex_default_map = {e["name"]: float(e.get("default_weight", 0)) for e in ex_defs}
+
     existing = data.get_session_by_date(username, date_str)
     if existing:
         st.session_state.rec_ex_names = [e["name"] for e in existing["exercises"]]
         st.session_state.rec_ex_sets = [len(e["sets"]) for e in existing["exercises"]]
         for i, ex in enumerate(existing["exercises"]):
             for j, s in enumerate(ex["sets"]):
-                st.session_state[f"rec_w_{i}_{j}"] = float(s["weight"])
-                st.session_state[f"rec_r_{i}_{j}"] = int(s["reps"])
+                saved_w = float(s["weight"])
+                # draft かつ重量未入力(0)の場合は種目マスタのデフォルト重量を使う
+                if existing["status"] == "draft" and saved_w == 0:
+                    w = ex_default_map.get(ex["name"], 0.0)
+                else:
+                    w = saved_w
+                r = int(s["reps"]) if s["reps"] else None
+                st.session_state[f"rec_w_{i}_{j}"] = w
+                st.session_state[f"rec_r_{i}_{j}"] = r
+                _set_shadow(i, j, w, r)
     else:
-        ex_defs = data.get_exercises(username)
         defaults = [e for e in ex_defs if e.get("status", STATUS_REQUIRED) != STATUS_OPTIONAL]
         st.session_state.rec_ex_names = [e["name"] for e in defaults]
         st.session_state.rec_ex_sets = [e.get("default_sets", 1) for e in defaults]
         for i, e in enumerate(defaults):
             for j in range(e.get("default_sets", 1)):
-                st.session_state[f"rec_w_{i}_{j}"] = float(e.get("default_weight", 0))
-                st.session_state[f"rec_r_{i}_{j}"] = 0
+                w = float(e.get("default_weight", 0))
+                st.session_state[f"rec_w_{i}_{j}"] = w
+                st.session_state[f"rec_r_{i}_{j}"] = None
+                _set_shadow(i, j, w, None)
     st.session_state.rec_current_date = date_str
 
 
@@ -81,7 +104,7 @@ def _ex_has_changes(i: int, ex_def: dict) -> bool:
     default_w = float(ex_def.get("default_weight", 0))
     for j in range(num_sets):
         w = st.session_state.get(f"rec_w_{i}_{j}", default_w)
-        r = st.session_state.get(f"rec_r_{i}_{j}", 0)
+        r = st.session_state.get(f"rec_r_{i}_{j}") or 0
         if w != default_w or r != 0:
             return True
     return False
@@ -91,7 +114,7 @@ def _set_has_changes(i: int, j: int, ex_def: dict) -> bool:
     """セット(i,j)がデフォルト値から変更されているか。"""
     default_w = float(ex_def.get("default_weight", 0))
     w = st.session_state.get(f"rec_w_{i}_{j}", default_w)
-    r = st.session_state.get(f"rec_r_{i}_{j}", 0)
+    r = st.session_state.get(f"rec_r_{i}_{j}") or 0
     return w != default_w or r != 0
 
 
@@ -116,21 +139,87 @@ def _build_session_from_state(date_str: str, status: str) -> dict:
         sets = []
         for j in range(st.session_state.rec_ex_sets[i]):
             sets.append({
-                "weight": st.session_state.get(f"rec_w_{i}_{j}", 0.0),
-                "reps": st.session_state.get(f"rec_r_{i}_{j}", 0),
+                "weight": st.session_state.get(f"rec_w_{i}_{j}") or 0.0,
+                "reps": st.session_state.get(f"rec_r_{i}_{j}") or 0,
             })
         exercises.append({"name": name, "sets": sets})
     return {"date": date_str, "status": status, "exercises": exercises}
 
 
 def page_record(username: str, date_str: str):
+    # ── ストップウォッチ ──────────────────────────────────────────
+    st.markdown("##### ⏱ インターバルタイマー")
+    components.html("""
+        <style>
+        body{background:transparent;font-family:sans-serif;margin:0;}
+        #disp{font-size:2.2rem;font-weight:bold;text-align:center;color:#fff;padding:8px 0;}
+        .btns{display:flex;gap:8px;justify-content:center;}
+        button{padding:7px 22px;border-radius:8px;border:none;cursor:pointer;font-size:0.95rem;font-weight:600;}
+        #bss{background:#ff4b4b;color:#fff;}
+        #brs{background:#555;color:#fff;}
+        </style>
+        <div id="disp">00:00</div>
+        <div class="btns">
+            <button id="bss" onclick="toggle()">▶ スタート</button>
+            <button id="brs" onclick="reset()">↺ リセット</button>
+        </div>
+        <script>
+        const KEY = 'wt_stopwatch';
+        let t = null, s = 0, on = false;
+
+        function upd() {
+            document.getElementById('disp').textContent =
+                String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
+        }
+        function save() {
+            localStorage.setItem(KEY, JSON.stringify({on, s, ts: on ? Date.now() : null}));
+        }
+        function toggle() {
+            if (on) {
+                clearInterval(t); on = false;
+                document.getElementById('bss').textContent = '▶ スタート';
+                document.getElementById('bss').style.background = '#ff4b4b';
+            } else {
+                t = setInterval(() => { s++; upd(); save(); }, 1000);
+                on = true;
+                document.getElementById('bss').textContent = '⏸ ストップ';
+                document.getElementById('bss').style.background = '#888';
+            }
+            save();
+        }
+        function reset() {
+            clearInterval(t); on = false; s = 0; upd(); save();
+            document.getElementById('bss').textContent = '▶ スタート';
+            document.getElementById('bss').style.background = '#ff4b4b';
+        }
+        // タブ復帰時にlocalStorageから状態を復元
+        (function load() {
+            try {
+                const d = JSON.parse(localStorage.getItem(KEY) || '{}');
+                if (d.on && d.ts) {
+                    s = (d.s || 0) + Math.floor((Date.now() - d.ts) / 1000);
+                    on = true;
+                    t = setInterval(() => { s++; upd(); save(); }, 1000);
+                    document.getElementById('bss').textContent = '⏸ ストップ';
+                    document.getElementById('bss').style.background = '#888';
+                } else {
+                    s = d.s || 0;
+                }
+                upd();
+            } catch(e) {}
+        })();
+        </script>
+        """, height=110)
+
     ex_defs = data.get_exercises(username)
     if not ex_defs:
         st.warning("種目が登録されていません。先に「種目管理」で種目を追加してください。")
         return
 
+    # 日付が変わった時だけ再初期化（タブ切り替えによるキー消失はshadowで対処）
     if st.session_state.get("rec_current_date") != date_str:
         _init_rec_state(username, date_str)
+        st.rerun()  # widgetが正しいデフォルト値を表示するために必要
 
     # 種目ステータスマップ
     status_map = {e["name"]: e.get("status", STATUS_REQUIRED) for e in ex_defs}
@@ -171,11 +260,16 @@ def page_record(username: str, date_str: str):
 
         num_sets = st.session_state.rec_ex_sets[i]
 
+        shadow = st.session_state.get("rec_shadow", {})
+        default_w = float(ex_def.get("default_weight", 0))
+
         for j in range(num_sets):
+            s_key = f"{i}_{j}"
+            # widgetキーが消えていたらshadowから復元（Streamlitがタブ切り替え時に削除するため）
             if f"rec_w_{i}_{j}" not in st.session_state:
-                st.session_state[f"rec_w_{i}_{j}"] = float(ex_def.get("default_weight", 0))
+                st.session_state[f"rec_w_{i}_{j}"] = shadow.get(s_key, {}).get("w", default_w)
             if f"rec_r_{i}_{j}" not in st.session_state:
-                st.session_state[f"rec_r_{i}_{j}"] = 0
+                st.session_state[f"rec_r_{i}_{j}"] = shadow.get(s_key, {}).get("r", None)
 
             rc = st.columns([0.7, 2.2, 0.4, 2.2, 0.6])
             rc[0].markdown(f"<div style='padding-top:8px;font-size:0.85rem;'>#{j+1}</div>",
@@ -185,7 +279,12 @@ def page_record(username: str, date_str: str):
             rc[2].markdown("<div style='padding-top:8px;text-align:center;'>×</div>",
                            unsafe_allow_html=True)
             rc[3].number_input("回数", min_value=0, max_value=100, step=1,
-                               key=f"rec_r_{i}_{j}", label_visibility="collapsed")
+                               key=f"rec_r_{i}_{j}", label_visibility="collapsed", value=None)
+
+            # widgetが描画されたらshadowを更新（次のタブ切り替えに備える）
+            _set_shadow(i, j,
+                        st.session_state.get(f"rec_w_{i}_{j}"),
+                        st.session_state.get(f"rec_r_{i}_{j}"))
             if num_sets > 1:
                 pending_set = st.session_state.get("pending_del_set")
                 if pending_set == (i, j):
@@ -202,8 +301,8 @@ def page_record(username: str, date_str: str):
             # セット削除の確認ダイアログ
             if st.session_state.get("pending_del_set") == (i, j):
                 with st.container(border=True):
-                    w_val = st.session_state.get(f"rec_w_{i}_{j}", 0)
-                    r_val = st.session_state.get(f"rec_r_{i}_{j}", 0)
+                    w_val = st.session_state.get(f"rec_w_{i}_{j}") or 0
+                    r_val = st.session_state.get(f"rec_r_{i}_{j}") or 0
                     st.warning(f"セット {j+1}（{w_val}kg × {r_val}回）の入力内容が失われます。削除しますか？")
                     sc1, sc2 = st.columns(2)
                     if sc1.button("はい、削除する", key=f"confirm_del_set_{i}_{j}", type="primary", use_container_width=True):
@@ -217,7 +316,7 @@ def page_record(username: str, date_str: str):
             if st.button("＋ セットを追加", key=f"rec_add_set_{i}"):
                 new_j = num_sets
                 st.session_state[f"rec_w_{i}_{new_j}"] = float(ex_def.get("default_weight", 0))
-                st.session_state[f"rec_r_{i}_{new_j}"] = 0
+                st.session_state[f"rec_r_{i}_{new_j}"] = None
                 st.session_state.rec_ex_sets[i] += 1
                 st.rerun()
 
@@ -239,7 +338,7 @@ def page_record(username: str, date_str: str):
                 st.session_state.rec_ex_sets.append(num_sets)
                 for j in range(num_sets):
                     st.session_state[f"rec_w_{new_i}_{j}"] = float(ex_def.get("default_weight", 0))
-                    st.session_state[f"rec_r_{new_i}_{j}"] = 0
+                    st.session_state[f"rec_r_{new_i}_{j}"] = None
                 st.rerun()
 
     st.divider()
@@ -247,12 +346,13 @@ def page_record(username: str, date_str: str):
     # バリデーション（必須のみチェック）
     required_names = {e["name"] for e in ex_defs if e.get("status") == STATUS_REQUIRED}
     all_required_filled = all(
-        st.session_state.get(f"rec_r_{i}_{j}", 0) > 0
+        (st.session_state.get(f"rec_r_{i}_{j}") or 0) > 0
         for i, name in enumerate(st.session_state.rec_ex_names)
         if name in required_names
         for j in range(st.session_state.rec_ex_sets[i])
     )
 
+    st.markdown('<div class="rec-footer-anchor"></div>', unsafe_allow_html=True)
     bc1, bc2 = st.columns(2)
     with bc1:
         if st.button("途中保存", use_container_width=True):
@@ -415,18 +515,55 @@ def page_history(username: str):
 def show_main():
     username = st.session_state.username
 
+    # ── セッションタイムアウト（30分無操作で自動ログアウト）────
+    if "last_activity" not in st.session_state:
+        st.session_state.last_activity = time.time()
+    elif time.time() - st.session_state.last_activity > IDLE_TIMEOUT:
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.warning("30分間操作がなかったため、自動ログアウトしました。")
+        st.rerun()
+    st.session_state.last_activity = time.time()
+
     if "active_tab" not in st.session_state:
         st.session_state.active_tab = "record"
     if "nav_date" not in st.session_state:
         st.session_state.nav_date = date.today()
 
     active = st.session_state.active_tab
+    prev_tab = st.session_state.get("prev_tab", active)
+
+    # ── 記録タブを離れるとき入力中データを自動下書き保存 ────────
+    if prev_tab == "record" and active != "record":
+        if st.session_state.get("rec_ex_names") and st.session_state.get("rec_current_date"):
+            draft = _build_session_from_state(st.session_state.rec_current_date, "draft")
+            data.upsert_session(username, draft)
+    st.session_state.prev_tab = active
 
     # ── CSS：全横並びブロックの折り返し禁止（paddingは変えない）──
     st.markdown("""
     <style>
     [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; }
     [data-testid="stColumn"] { min-width: 0 !important; overflow: hidden; }
+
+    /* 途中保存・登録ボタンを画面下部に固定 */
+    /* stVerticalBlockの直接子の中で .rec-footer-anchor を含む要素の直後の兄弟要素を対象にする
+       （ラッパーdivの有無を問わず動作する） */
+    [data-testid="stVerticalBlock"] > *:has(.rec-footer-anchor) + * {
+        position: fixed !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        z-index: 999 !important;
+        background: rgba(14, 17, 23, 0.97) !important;
+        padding: 10px 2rem !important;
+        border-top: 1px solid rgba(255, 255, 255, 0.1) !important;
+        backdrop-filter: blur(8px) !important;
+    }
+    /* フッターに隠れないよう下部にパディング */
+    [data-testid="stMainBlockContainer"] {
+        padding-bottom: 90px !important;
+    }
 
     /* radioをタブ風に */
     [data-testid="stRadio"] > div[role="radiogroup"] {

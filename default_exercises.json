@@ -1,0 +1,50 @@
+[
+  {
+    "name": "ベンチプレス",
+    "default_sets": 5,
+    "default_weight": 70.0,
+    "status": "⭐ 必須"
+  },
+  {
+    "name": "スクワット",
+    "default_sets": 3,
+    "default_weight": 80.0,
+    "status": "⭐ 必須"
+  },
+  {
+    "name": "インクラインベンチプレス",
+    "default_sets": 3,
+    "default_weight": 70.0,
+    "status": "⭐ 必須"
+  },
+  {
+    "name": "ペックフライ",
+    "default_sets": 3,
+    "default_weight": 77.0,
+    "status": "⭐ 必須"
+  },
+  {
+    "name": "腹筋",
+    "default_sets": 3,
+    "default_weight": 0.0,
+    "status": "⭐ 必須"
+  },
+  {
+    "name": "ランニング",
+    "default_sets": 1,
+    "default_weight": 1.5,
+    "status": "⭐ 必須"
+  },
+  {
+    "name": "ショルダープレス",
+    "default_sets": 3,
+    "default_weight": 60.0,
+    "status": "🔶 条件付き必須"
+  },
+  {
+    "name": "ラッドプルダウン",
+    "default_sets": 3,
+    "default_weight": 64.0,
+    "status": "🔶 条件付き必須"
+  }
+]
