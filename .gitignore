@@ -18,4 +18,5 @@ __pycache__/
 venv/
 
 # OS
-.DS_St
+.DS_Store
+Thumbs.db

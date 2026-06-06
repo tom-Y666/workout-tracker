@@ -612,4 +612,63 @@ def show_main():
         display: flex !important; gap: 6px !important;
     }
     [data-testid="stRadio"] > div[role="radiogroup"] > label {
-        fle
+        flex: 1 !important; text-align: center !important;
+        padding: 8px 4px !important; border-radius: 6px !important;
+        border: 1px solid rgba(255,255,255,0.15) !important; cursor: pointer !important;
+        white-space: nowrap !important; overflow: hidden !important;
+        text-overflow: ellipsis !important;
+    }
+    [data-testid="stRadio"] > div[role="radiogroup"] > label:has(input:checked) {
+        background: #ff4b4b !important; border-color: #ff4b4b !important; font-weight: 600 !important;
+    }
+    [data-testid="stRadio"] > div[role="radiogroup"] > label > div:first-child {
+        display: none !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ── 1行目：タブ（radioで横並び保証）────────────────────────
+    TABS = {"📝 記録する": "record", "🏋️ 種目管理": "exercises", "📈 過去の記録": "history"}
+    labels = list(TABS.keys())
+    current_label = next(k for k, v in TABS.items() if v == active)
+    selected = st.radio("", labels, index=labels.index(current_label),
+                        horizontal=True, label_visibility="collapsed", key="nav_radio")
+    if TABS[selected] != active:
+        st.session_state.active_tab = TABS[selected]
+        st.rerun()
+
+    # ── 2行目：日付・ユーザー名・ログアウト ──────────────────────
+    c_date, c_user, c_logout = st.columns([2, 4, 1])
+    with c_date:
+        st.session_state.nav_date = st.date_input(
+            "", value=st.session_state.nav_date,
+            label_visibility="collapsed", key="nav_date_input",
+        )
+    c_user.markdown(
+        f'<div style="text-align:right;padding-top:6px;font-size:0.85rem;color:#888;">'
+        f'👤 {username}</div>', unsafe_allow_html=True,
+    )
+    with c_logout:
+        if st.button("🚪", help="ログアウト", use_container_width=True):
+            auth.delete_session(st.session_state.get("session_token"))
+            st.query_params.clear()
+            for k in list(st.session_state.keys()):
+                del st.session_state[k]
+            st.rerun()
+
+    st.divider()
+
+    date_str = str(st.session_state.nav_date)
+
+    if active == "record":
+        page_record(username, date_str)
+    elif active == "exercises":
+        page_exercises(username)
+    else:
+        page_history(username)
+
+
+if st.session_state.logged_in:
+    show_main()
+else:
+    show_login()

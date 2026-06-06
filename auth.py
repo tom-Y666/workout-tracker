@@ -80,4 +80,81 @@ def authenticate(username: str, password: str) -> tuple[bool, str | None]:
 
 # ── ブラウザリロードでのセッション継続 ──────────────────────────
 # st.session_state はブラウザとの接続（WebSocket）に紐づいており、
-# ページをリロー
+# ページをリロードすると新しいセッションになって失われる。
+# そこでログイン時にトークンを発行してURL（st.query_params）に載せ、
+# サーバー側 sessions.json と突き合わせて「30分以内の活動なら復元する」。
+
+def _load_sessions() -> dict:
+    if not os.path.exists(SESSIONS_FILE):
+        return {}
+    with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _save_sessions(sessions: dict):
+    with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(sessions, f, ensure_ascii=False, indent=2)
+
+
+def create_session(username: str) -> str:
+    """ログイン成功時にセッショントークンを発行し、サーバー側に記録する。
+    あわせて長期間活動のない古いレコード（24時間超）を掃除し、肥大化を防ぐ。"""
+    token = secrets.token_urlsafe(32)
+    sessions = _load_sessions()
+    now = time.time()
+    sessions = {k: v for k, v in sessions.items()
+                if now - v.get("last_activity", 0) <= 24 * 60 * 60}
+    sessions[token] = {"username": username, "last_activity": now}
+    _save_sessions(sessions)
+    return token
+
+
+def resume_session(token: str, max_idle: int) -> str | None:
+    """トークンが有効（max_idle秒以内に活動）ならusernameを返す。
+    期限切れ・不正なトークンの場合はNoneを返し、レコードを削除する。"""
+    if not token:
+        return None
+    sessions = _load_sessions()
+    s = sessions.get(token)
+    if not s:
+        return None
+    if time.time() - s.get("last_activity", 0) > max_idle:
+        sessions.pop(token, None)
+        _save_sessions(sessions)
+        return None
+    return s["username"]
+
+
+def touch_session(token: str, min_interval: int = 60):
+    """セッションの最終活動時刻を更新する。
+    毎回の再描画で書き込むとI/Oが増えるため、min_interval秒以上経過時のみ書き込む。"""
+    if not token:
+        return
+    sessions = _load_sessions()
+    s = sessions.get(token)
+    if not s:
+        return
+    now = time.time()
+    if now - s.get("last_activity", 0) >= min_interval:
+        s["last_activity"] = now
+        _save_sessions(sessions)
+
+
+def delete_session(token: str):
+    """ログアウト・タイムアウト時にセッションレコードを削除する。"""
+    if not token:
+        return
+    sessions = _load_sessions()
+    if sessions.pop(token, None) is not None:
+        _save_sessions(sessions)
+
+
+def unlock_user(username: str) -> bool:
+    """管理者用：アカウントのロックを解除する。"""
+    users = _load_users()
+    if username not in users:
+        return False
+    users[username]["locked"] = False
+    users[username]["failed_attempts"] = 0
+    _save_users(users)
+    return True
