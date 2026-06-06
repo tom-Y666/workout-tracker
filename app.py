@@ -18,6 +18,21 @@ for key, default in [("logged_in", False), ("username", "")]:
 
 auth.init_from_secrets()  # Secretsから初期ユーザーを自動作成
 
+# ── ブラウザリロード時のセッション復元 ──────────────────────────
+# st.session_state はリロードで失われるため、URLに載せたトークン(?session=...)を
+# sessions.json と突き合わせ、IDLE_TIMEOUT以内の活動があれば再ログインなしで復元する。
+if not st.session_state.logged_in:
+    _qp_token = st.query_params.get("session")
+    if _qp_token:
+        _restored_user = auth.resume_session(_qp_token, IDLE_TIMEOUT)
+        if _restored_user:
+            st.session_state.logged_in = True
+            st.session_state.username = _restored_user
+            st.session_state.session_token = _qp_token
+            st.session_state.last_activity = time.time()
+        else:
+            st.query_params.clear()
+
 # 種目区分の定義
 STATUS_REQUIRED = "⭐ 必須"
 STATUS_CONDITIONAL = "🔶 条件付き必須"
@@ -42,6 +57,9 @@ def show_login():
                 if ok:
                     st.session_state.logged_in = True
                     st.session_state.username = username
+                    token = auth.create_session(username)
+                    st.session_state.session_token = token
+                    st.query_params["session"] = token  # リロード時の継続用にURLへ保持
                     data.init_default_exercises(username)  # 種目が0件ならテンプレートから初期投入
                     st.rerun()
                 else:
@@ -165,49 +183,69 @@ def page_record(username: str, date_str: str):
         </div>
         <script>
         const KEY = 'wt_stopwatch';
-        let t = null, s = 0, on = false;
+        // タイムスタンプベースで経過時間を算出する（setIntervalのカウンタ加算はしない）。
+        // バックグラウンド化でタイマーが間引かれても、表示更新時に
+        // Date.now() との差分から常に正しい経過時間を再計算するためズレが生じない。
+        let startTs = null;     // 現在の計測区間の開始時刻（ms）
+        let accumulated = 0;    // それ以前に積み上がった経過時間（ms）
+        let on = false;
+        let t = null;
 
-        function upd() {
+        function elapsedMs() {
+            return accumulated + ((on && startTs) ? (Date.now() - startTs) : 0);
+        }
+        function render() {
+            const sec = Math.floor(elapsedMs() / 1000);
             document.getElementById('disp').textContent =
-                String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
+                String(Math.floor(sec/60)).padStart(2,'0') + ':' + String(sec%60).padStart(2,'0');
         }
         function save() {
-            localStorage.setItem(KEY, JSON.stringify({on, s, ts: on ? Date.now() : null}));
+            localStorage.setItem(KEY, JSON.stringify({on, startTs, accumulated}));
         }
         function toggle() {
             if (on) {
-                clearInterval(t); on = false;
+                accumulated = elapsedMs();
+                startTs = null;
+                on = false;
+                clearInterval(t);
                 document.getElementById('bss').textContent = '▶ スタート';
                 document.getElementById('bss').style.background = '#ff4b4b';
             } else {
-                t = setInterval(() => { s++; upd(); save(); }, 1000);
+                startTs = Date.now();
                 on = true;
+                t = setInterval(render, 1000);
                 document.getElementById('bss').textContent = '⏸ ストップ';
                 document.getElementById('bss').style.background = '#888';
             }
             save();
+            render();
         }
         function reset() {
-            clearInterval(t); on = false; s = 0; upd(); save();
+            clearInterval(t);
+            on = false; startTs = null; accumulated = 0;
+            save(); render();
             document.getElementById('bss').textContent = '▶ スタート';
             document.getElementById('bss').style.background = '#ff4b4b';
         }
-        // タブ復帰時にlocalStorageから状態を復元
+        // タブ復帰・リロード時にlocalStorageから状態を復元
         (function load() {
             try {
                 const d = JSON.parse(localStorage.getItem(KEY) || '{}');
-                if (d.on && d.ts) {
-                    s = (d.s || 0) + Math.floor((Date.now() - d.ts) / 1000);
+                accumulated = d.accumulated || 0;
+                if (d.on && d.startTs) {
+                    startTs = d.startTs;
                     on = true;
-                    t = setInterval(() => { s++; upd(); save(); }, 1000);
+                    t = setInterval(render, 1000);
                     document.getElementById('bss').textContent = '⏸ ストップ';
                     document.getElementById('bss').style.background = '#888';
-                } else {
-                    s = d.s || 0;
                 }
-                upd();
+                render();
             } catch(e) {}
         })();
+        // バックグラウンドから復帰した瞬間に表示を即座に正しい値へ更新
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) render();
+        });
         </script>
         """, height=110)
 
@@ -519,11 +557,15 @@ def show_main():
     if "last_activity" not in st.session_state:
         st.session_state.last_activity = time.time()
     elif time.time() - st.session_state.last_activity > IDLE_TIMEOUT:
+        auth.delete_session(st.session_state.get("session_token"))
+        st.query_params.clear()
         for k in list(st.session_state.keys()):
             del st.session_state[k]
         st.warning("30分間操作がなかったため、自動ログアウトしました。")
         st.rerun()
     st.session_state.last_activity = time.time()
+    # サーバー側にも最終活動時刻を記録（リロード時の30分判定に使用。書き込みは間引く）
+    auth.touch_session(st.session_state.get("session_token"))
 
     if "active_tab" not in st.session_state:
         st.session_state.active_tab = "record"
@@ -570,61 +612,4 @@ def show_main():
         display: flex !important; gap: 6px !important;
     }
     [data-testid="stRadio"] > div[role="radiogroup"] > label {
-        flex: 1 !important; text-align: center !important;
-        padding: 8px 4px !important; border-radius: 6px !important;
-        border: 1px solid rgba(255,255,255,0.15) !important; cursor: pointer !important;
-        white-space: nowrap !important; overflow: hidden !important;
-        text-overflow: ellipsis !important;
-    }
-    [data-testid="stRadio"] > div[role="radiogroup"] > label:has(input:checked) {
-        background: #ff4b4b !important; border-color: #ff4b4b !important; font-weight: 600 !important;
-    }
-    [data-testid="stRadio"] > div[role="radiogroup"] > label > div:first-child {
-        display: none !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    # ── 1行目：タブ（radioで横並び保証）────────────────────────
-    TABS = {"📝 記録する": "record", "🏋️ 種目管理": "exercises", "📈 過去の記録": "history"}
-    labels = list(TABS.keys())
-    current_label = next(k for k, v in TABS.items() if v == active)
-    selected = st.radio("", labels, index=labels.index(current_label),
-                        horizontal=True, label_visibility="collapsed", key="nav_radio")
-    if TABS[selected] != active:
-        st.session_state.active_tab = TABS[selected]
-        st.rerun()
-
-    # ── 2行目：日付・ユーザー名・ログアウト ──────────────────────
-    c_date, c_user, c_logout = st.columns([2, 4, 1])
-    with c_date:
-        st.session_state.nav_date = st.date_input(
-            "", value=st.session_state.nav_date,
-            label_visibility="collapsed", key="nav_date_input",
-        )
-    c_user.markdown(
-        f'<div style="text-align:right;padding-top:6px;font-size:0.85rem;color:#888;">'
-        f'👤 {username}</div>', unsafe_allow_html=True,
-    )
-    with c_logout:
-        if st.button("🚪", help="ログアウト", use_container_width=True):
-            for k in list(st.session_state.keys()):
-                del st.session_state[k]
-            st.rerun()
-
-    st.divider()
-
-    date_str = str(st.session_state.nav_date)
-
-    if active == "record":
-        page_record(username, date_str)
-    elif active == "exercises":
-        page_exercises(username)
-    else:
-        page_history(username)
-
-
-if st.session_state.logged_in:
-    show_main()
-else:
-    show_login()
+        fle

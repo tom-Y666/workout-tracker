@@ -8,6 +8,7 @@ CLAUDE_MEMO.md
 users.json
 workouts.json
 exercises.json
+sessions.json
 
 # Python
 __pycache__/
@@ -17,5 +18,4 @@ __pycache__/
 venv/
 
 # OS
-.DS_Store
-Thumbs.db
+.DS_St

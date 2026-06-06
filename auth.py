@@ -1,8 +1,11 @@
 import json
 import hashlib
 import os
+import time
+import secrets
 
 USERS_FILE = "users.json"
+SESSIONS_FILE = "sessions.json"
 
 
 def _load_users() -> dict:
@@ -75,12 +78,6 @@ def authenticate(username: str, password: str) -> tuple[bool, str | None]:
         return False, f"パスワードが違います（あと {remaining} 回間違えるとロック）"
 
 
-def unlock_user(username: str) -> bool:
-    """管理者用：アカウントのロックを解除する。"""
-    users = _load_users()
-    if username not in users:
-        return False
-    users[username]["locked"] = False
-    users[username]["failed_attempts"] = 0
-    _save_users(users)
-    return True
+# ── ブラウザリロードでのセッション継続 ──────────────────────────
+# st.session_state はブラウザとの接続（WebSocket）に紐づいており、
+# ページをリロー
