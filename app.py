@@ -205,6 +205,7 @@ def page_record(username: str, date_str: str):
         let ticker = null;
         let alarmTicker = null;
         let audioCtx = null;
+        let scheduledNodes = [];  // バックグラウンド対策: 事前スケジュール済みノード
 
         function getAudioCtx() {
             if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -269,6 +270,10 @@ def page_record(username: str, date_str: str):
             playBeep();
             alarmTicker = setInterval(playBeep, 3000);
         }
+        function cancelScheduledNodes() {
+            scheduledNodes.forEach(n => { try { n.stop(); } catch(e) {} });
+            scheduledNodes = [];
+        }
         function startTimer() {
             const secs = getInputSecs();
             if (secs <= 0) return;
@@ -286,6 +291,24 @@ def page_record(username: str, date_str: str):
             deadline = Date.now() + secs * 1000;
             running = true; alarming = false;
             clearInterval(alarmTicker); alarmTicker = null;
+            // バックグラウンド対策: アラーム音をオーディオスレッドに事前スケジュール
+            // (JSスレッドが止まっても発火する可能性がある)
+            cancelScheduledNodes();
+            try {
+                const ctx = getAudioCtx();
+                const alarmAt = ctx.currentTime + secs;
+                for (let i = 0; i < 5; i++) {
+                    const t = alarmAt + i * 3;
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.connect(gain); gain.connect(ctx.destination);
+                    osc.type = 'sine'; osc.frequency.value = 880;
+                    gain.gain.setValueAtTime(0.5, t);
+                    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.7);
+                    osc.start(t); osc.stop(t + 0.7);
+                    scheduledNodes.push(osc);
+                }
+            } catch(e) {}
             showRunningUI();
             save(); tick();
             ticker = setInterval(tick, 500);
@@ -294,6 +317,7 @@ def page_record(username: str, date_str: str):
             running = false; alarming = false;
             clearInterval(ticker); ticker = null;
             clearInterval(alarmTicker); alarmTicker = null;
+            cancelScheduledNodes();
             deadline = null;
             document.getElementById('disp').textContent = fmt(targetSecs * 1000);
             showStoppedUI();
