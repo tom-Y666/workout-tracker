@@ -170,7 +170,7 @@ def page_record(username: str, date_str: str):
     components.html("""
         <style>
         body{background:transparent;font-family:sans-serif;margin:0;}
-        #disp{font-size:2.2rem;font-weight:bold;text-align:center;color:#fff;padding:6px 0 2px;}
+        #disp{font-size:2.2rem;font-weight:bold;text-align:center;color:#fff;padding:6px 0 2px;display:none;}
         #alarm-msg{text-align:center;color:#ff4b4b;font-weight:bold;font-size:0.95rem;min-height:1.4em;margin-bottom:2px;}
         .inputs{display:flex;align-items:center;justify-content:center;gap:6px;margin:4px 0 6px;}
         .inputs input{width:48px;padding:3px 2px;font-size:1rem;text-align:center;
@@ -240,10 +240,12 @@ def page_record(username: str, date_str: str):
             document.getElementById('inp-sec').value = secs % 60;
         }
         function showRunningUI() {
+            document.getElementById('disp').style.display = 'block';
             document.getElementById('time-inputs').style.display = 'none';
             document.getElementById('bstart').style.display = 'none';
         }
         function showStoppedUI() {
+            document.getElementById('disp').style.display = 'none';
             document.getElementById('time-inputs').style.display = 'flex';
             document.getElementById('bstart').style.display = '';
             document.getElementById('alarm-msg').textContent = '';
@@ -270,6 +272,8 @@ def page_record(username: str, date_str: str):
         function startTimer() {
             const secs = getInputSecs();
             if (secs <= 0) return;
+            // iOS対策: ユーザー操作中にAudioContextをアンロックしておく
+            try { getAudioCtx().resume(); } catch(e) {}
             targetSecs = secs;
             deadline = Date.now() + secs * 1000;
             running = true; alarming = false;
