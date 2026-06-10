@@ -166,7 +166,7 @@ def _build_session_from_state(date_str: str, status: str) -> dict:
 
 def page_record(username: str, date_str: str):
     # ── インターバルアラーム ──────────────────────────────────────
-    st.markdown("##### ⏱ インターバルアラーム")
+    st.markdown("#### ⏱ インターバルアラーム")
     components.html("""
         <style>
         body{background:transparent;font-family:sans-serif;margin:0;}
@@ -420,7 +420,7 @@ def page_record(username: str, date_str: str):
             if f"rec_r_{i}_{j}" not in st.session_state:
                 st.session_state[f"rec_r_{i}_{j}"] = shadow.get(s_key, {}).get("r", None)
 
-            rc = st.columns([0.7, 2.2, 0.4, 2.2, 0.6])
+            rc = st.columns([0.6, 2.0, 0.3, 2.0, 1.0])
             rc[0].markdown(f"<div style='padding-top:8px;font-size:0.85rem;'>#{j+1}</div>",
                            unsafe_allow_html=True)
             rc[1].number_input("重量(kg)", min_value=0.0, max_value=500.0, step=2.5,
@@ -584,7 +584,7 @@ def page_exercises(username: str):
         row[1].write(ex["default_sets"])
         row[2].write(ex["default_weight"])
         row[3].write(ex.get("status", STATUS_REQUIRED))
-        if row[4].button("削除", key=f"del_ex_{ex['name']}"):
+        if row[4].button("🗑️", key=f"del_ex_{ex['name']}"):
             data.delete_exercise(username, ex["name"])
             st.rerun()
 
@@ -719,8 +719,13 @@ def show_main():
     }
 
     /* radioをタブ風に */
+    [data-testid="stRadio"] {
+        width: 100% !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
     [data-testid="stRadio"] > div[role="radiogroup"] {
-        display: flex !important; gap: 6px !important;
+        display: flex !important; gap: 6px !important; width: 100% !important;
     }
     [data-testid="stRadio"] > div[role="radiogroup"] > label {
         flex: 1 !important; text-align: center !important;
