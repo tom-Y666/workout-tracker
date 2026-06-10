@@ -173,7 +173,7 @@ def page_record(username: str, date_str: str):
         #disp{font-size:2.2rem;font-weight:bold;text-align:center;color:#fff;padding:6px 0 2px;display:none;}
         #alarm-msg{text-align:center;color:#ff4b4b;font-weight:bold;font-size:0.95rem;min-height:1.4em;margin-bottom:2px;}
         .inputs{display:flex;align-items:center;justify-content:center;gap:6px;margin:4px 0 6px;}
-        .inputs input{width:48px;padding:3px 2px;font-size:1rem;text-align:center;
+        .inputs input{width:52px;padding:8px 2px;font-size:1rem;text-align:center;
             border-radius:6px;border:1px solid #555;background:#1a1a2e;color:#fff;}
         .inputs label{color:#bbb;font-size:0.9rem;}
         .btns{display:flex;gap:8px;justify-content:center;}
@@ -272,8 +272,16 @@ def page_record(username: str, date_str: str):
         function startTimer() {
             const secs = getInputSecs();
             if (secs <= 0) return;
-            // iOS対策: ユーザー操作中にAudioContextをアンロックしておく
-            try { getAudioCtx().resume(); } catch(e) {}
+            // iOS対策: ユーザー操作中（同期処理内）に無音バッファを再生してAudioContextをアンロック
+            try {
+                const ctx = getAudioCtx();
+                const buf = ctx.createBuffer(1, 1, 22050);
+                const src = ctx.createBufferSource();
+                src.buffer = buf;
+                src.connect(ctx.destination);
+                src.start(0);
+                ctx.resume();
+            } catch(e) {}
             targetSecs = secs;
             deadline = Date.now() + secs * 1000;
             running = true; alarming = false;
