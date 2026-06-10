@@ -165,89 +165,164 @@ def _build_session_from_state(date_str: str, status: str) -> dict:
 
 
 def page_record(username: str, date_str: str):
-    # ── ストップウォッチ ──────────────────────────────────────────
-    st.markdown("##### ⏱ インターバルタイマー")
+    # ── インターバルアラーム ──────────────────────────────────────
+    st.markdown("##### ⏱ インターバルアラーム")
     components.html("""
         <style>
         body{background:transparent;font-family:sans-serif;margin:0;}
-        #disp{font-size:2.2rem;font-weight:bold;text-align:center;color:#fff;padding:8px 0;}
+        #disp{font-size:2.2rem;font-weight:bold;text-align:center;color:#fff;padding:6px 0 2px;}
+        #alarm-msg{text-align:center;color:#ff4b4b;font-weight:bold;font-size:0.95rem;min-height:1.4em;margin-bottom:2px;}
+        .inputs{display:flex;align-items:center;justify-content:center;gap:6px;margin:4px 0 6px;}
+        .inputs input{width:48px;padding:3px 2px;font-size:1rem;text-align:center;
+            border-radius:6px;border:1px solid #555;background:#1a1a2e;color:#fff;}
+        .inputs label{color:#bbb;font-size:0.9rem;}
         .btns{display:flex;gap:8px;justify-content:center;}
         button{padding:7px 22px;border-radius:8px;border:none;cursor:pointer;font-size:0.95rem;font-weight:600;}
-        #bss{background:#ff4b4b;color:#fff;}
-        #brs{background:#555;color:#fff;}
+        #bstart{background:#ff4b4b;color:#fff;}
+        #breset{background:#555;color:#fff;}
         </style>
-        <div id="disp">00:00</div>
-        <div class="btns">
-            <button id="bss" onclick="toggle()">▶ スタート</button>
-            <button id="brs" onclick="reset()">↺ リセット</button>
-        </div>
-        <script>
-        const KEY = 'wt_stopwatch';
-        // タイムスタンプベースで経過時間を算出する（setIntervalのカウンタ加算はしない）。
-        // バックグラウンド化でタイマーが間引かれても、表示更新時に
-        // Date.now() との差分から常に正しい経過時間を再計算するためズレが生じない。
-        let startTs = null;     // 現在の計測区間の開始時刻（ms）
-        let accumulated = 0;    // それ以前に積み上がった経過時間（ms）
-        let on = false;
-        let t = null;
 
-        function elapsedMs() {
-            return accumulated + ((on && startTs) ? (Date.now() - startTs) : 0);
+        <div id="disp">02:00</div>
+        <div id="alarm-msg"></div>
+        <div class="inputs" id="time-inputs">
+            <input type="number" id="inp-min" min="0" max="60" value="2">
+            <label>分</label>
+            <input type="number" id="inp-sec" min="0" max="59" value="0">
+            <label>秒</label>
+        </div>
+        <div class="btns">
+            <button id="bstart" onclick="startTimer()">▶ スタート</button>
+            <button id="breset" onclick="resetTimer()">↺ リセット</button>
+        </div>
+
+        <script>
+        const KEY = 'wt_alarm';
+        // カウントダウンアラーム。タイムスタンプ方式でバックグラウンド時もズレなし。
+        let deadline = null;   // 0:00になるms epoch
+        let targetSecs = 120;  // 設定した秒数（リセット時に戻る値）
+        let running = false;
+        let alarming = false;
+        let ticker = null;
+        let alarmTicker = null;
+        let audioCtx = null;
+
+        function getAudioCtx() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            return audioCtx;
         }
-        function render() {
-            const sec = Math.floor(elapsedMs() / 1000);
-            document.getElementById('disp').textContent =
-                String(Math.floor(sec/60)).padStart(2,'0') + ':' + String(sec%60).padStart(2,'0');
+        function playBeep() {
+            try {
+                const ctx = getAudioCtx();
+                if (ctx.state === 'suspended') ctx.resume();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.connect(gain); gain.connect(ctx.destination);
+                osc.type = 'sine'; osc.frequency.value = 880;
+                gain.gain.setValueAtTime(0.5, ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.7);
+                osc.start(ctx.currentTime); osc.stop(ctx.currentTime + 0.7);
+            } catch(e) {}
+        }
+        function fmt(ms) {
+            const s = Math.max(0, Math.ceil(ms / 1000));
+            return String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
         }
         function save() {
-            localStorage.setItem(KEY, JSON.stringify({on, startTs, accumulated}));
+            localStorage.setItem(KEY, JSON.stringify({running, alarming, deadline, targetSecs}));
         }
-        function toggle() {
-            if (on) {
-                accumulated = elapsedMs();
-                startTs = null;
-                on = false;
-                clearInterval(t);
-                document.getElementById('bss').textContent = '▶ スタート';
-                document.getElementById('bss').style.background = '#ff4b4b';
-            } else {
-                startTs = Date.now();
-                on = true;
-                t = setInterval(render, 1000);
-                document.getElementById('bss').textContent = '⏸ ストップ';
-                document.getElementById('bss').style.background = '#888';
+        function getInputSecs() {
+            const m = Math.max(0, Math.min(60, parseInt(document.getElementById('inp-min').value) || 0));
+            const s = Math.max(0, Math.min(59, parseInt(document.getElementById('inp-sec').value) || 0));
+            return m * 60 + s;
+        }
+        function setInputs(secs) {
+            document.getElementById('inp-min').value = Math.floor(secs / 60);
+            document.getElementById('inp-sec').value = secs % 60;
+        }
+        function showRunningUI() {
+            document.getElementById('time-inputs').style.display = 'none';
+            document.getElementById('bstart').style.display = 'none';
+        }
+        function showStoppedUI() {
+            document.getElementById('time-inputs').style.display = 'flex';
+            document.getElementById('bstart').style.display = '';
+            document.getElementById('alarm-msg').textContent = '';
+            document.getElementById('disp').style.color = '#fff';
+        }
+        function tick() {
+            if (!running) return;
+            const rem = deadline - Date.now();
+            if (rem <= 0) {
+                document.getElementById('disp').textContent = '00:00';
+                clearInterval(ticker); ticker = null;
+                running = false; alarming = true;
+                save(); fireAlarm();
+                return;
             }
+            document.getElementById('disp').textContent = fmt(rem);
+        }
+        function fireAlarm() {
+            document.getElementById('disp').style.color = '#ff4b4b';
+            document.getElementById('alarm-msg').textContent = '⏰ 時間です！';
+            playBeep();
+            alarmTicker = setInterval(playBeep, 3000);
+        }
+        function startTimer() {
+            const secs = getInputSecs();
+            if (secs <= 0) return;
+            targetSecs = secs;
+            deadline = Date.now() + secs * 1000;
+            running = true; alarming = false;
+            clearInterval(alarmTicker); alarmTicker = null;
+            showRunningUI();
+            save(); tick();
+            ticker = setInterval(tick, 500);
+        }
+        function resetTimer() {
+            running = false; alarming = false;
+            clearInterval(ticker); ticker = null;
+            clearInterval(alarmTicker); alarmTicker = null;
+            deadline = null;
+            document.getElementById('disp').textContent = fmt(targetSecs * 1000);
+            showStoppedUI();
             save();
-            render();
         }
-        function reset() {
-            clearInterval(t);
-            on = false; startTs = null; accumulated = 0;
-            save(); render();
-            document.getElementById('bss').textContent = '▶ スタート';
-            document.getElementById('bss').style.background = '#ff4b4b';
-        }
-        // タブ復帰・リロード時にlocalStorageから状態を復元
+        // ページ読み込み・タブ復帰時の状態復元
         (function load() {
             try {
                 const d = JSON.parse(localStorage.getItem(KEY) || '{}');
-                accumulated = d.accumulated || 0;
-                if (d.on && d.startTs) {
-                    startTs = d.startTs;
-                    on = true;
-                    t = setInterval(render, 1000);
-                    document.getElementById('bss').textContent = '⏸ ストップ';
-                    document.getElementById('bss').style.background = '#888';
+                if (d.targetSecs) { targetSecs = d.targetSecs; setInputs(targetSecs); }
+                if (d.alarming) {
+                    showRunningUI();
+                    document.getElementById('disp').textContent = '00:00';
+                    alarming = true; fireAlarm();
+                } else if (d.running && d.deadline) {
+                    deadline = d.deadline;
+                    const rem = deadline - Date.now();
+                    if (rem > 0) {
+                        running = true; showRunningUI();
+                        tick(); ticker = setInterval(tick, 500);
+                    } else {
+                        // バックグラウンド中に時間切れ
+                        showRunningUI();
+                        document.getElementById('disp').textContent = '00:00';
+                        alarming = true; fireAlarm();
+                    }
+                } else {
+                    document.getElementById('disp').textContent = fmt(targetSecs * 1000);
                 }
-                render();
-            } catch(e) {}
+            } catch(e) {
+                document.getElementById('disp').textContent = fmt(targetSecs * 1000);
+            }
         })();
-        // バックグラウンドから復帰した瞬間に表示を即座に正しい値へ更新
+        // タブ復帰時に即時反映（バックグラウンド中の時間切れも検出）
         document.addEventListener('visibilitychange', () => {
-            if (!document.hidden) render();
+            if (document.hidden) return;
+            if (running) tick();
+            else if (alarming) playBeep();
         });
         </script>
-        """, height=110)
+        """, height=165)
 
     ex_defs = data.get_exercises(username)
     if not ex_defs:
