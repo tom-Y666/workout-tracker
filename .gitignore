@@ -20,3 +20,6 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code ローカル設定（マシン固有の絶対パスを含むため共有しない）
+.claude/
