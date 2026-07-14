@@ -38,12 +38,10 @@ def main():
             print(f"❌ ユーザー '{username}' が見つかりません")
 
     elif cmd == "list":
-        import json, os
-        if not os.path.exists("users.json"):
+        users = auth.list_users()
+        if not users:
             print("ユーザーが登録されていません")
             return
-        with open("users.json", "r", encoding="utf-8") as f:
-            users = json.load(f)
         print(f"{'ユーザー名':<20} {'ロック':<8} {'失敗回数'}")
         print("-" * 40)
         for name, info in users.items():

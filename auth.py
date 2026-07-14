@@ -1,23 +1,8 @@
-import json
 import hashlib
-import os
 import time
 import secrets
 
-USERS_FILE = "users.json"
-SESSIONS_FILE = "sessions.json"
-
-
-def _load_users() -> dict:
-    if not os.path.exists(USERS_FILE):
-        return {}
-    with open(USERS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _save_users(users: dict):
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
+from supabase_client import get_client
 
 
 def _hash_password(password: str) -> str:
@@ -25,12 +10,13 @@ def _hash_password(password: str) -> str:
 
 
 def init_from_secrets():
-    """Streamlit Secretsから初期ユーザーを自動作成（ファイルが空の場合のみ）。"""
+    """Streamlit Secretsから初期ユーザーを自動作成（テーブルが空の場合のみ）。"""
     try:
         import streamlit as st
         if "users" not in st.secrets:
             return
-        if _load_users():  # すでにユーザーがいれば何もしない
+        existing = get_client().table("users").select("username").limit(1).execute()
+        if existing.data:  # すでにユーザーがいれば何もしない
             return
         for username, password in st.secrets["users"].items():
             register_user(username, str(password))
@@ -40,72 +26,71 @@ def init_from_secrets():
 
 def register_user(username: str, password: str) -> bool:
     """管理者用：ユーザー登録。既存ユーザーの場合はFalseを返す。"""
-    users = _load_users()
-    if username in users:
+    client = get_client()
+    existing = client.table("users").select("username").eq("username", username).execute()
+    if existing.data:
         return False
-    users[username] = {
+    client.table("users").insert({
+        "username": username,
         "password": _hash_password(password),
         "failed_attempts": 0,
         "locked": False,
-    }
-    _save_users(users)
+    }).execute()
     return True
 
 
 def authenticate(username: str, password: str) -> tuple[bool, str | None]:
     """認証。(成功フラグ, エラーメッセージ) を返す。"""
-    users = _load_users()
-    if username not in users:
+    client = get_client()
+    res = client.table("users").select("*").eq("username", username).execute()
+    if not res.data:
         return False, "ユーザー名またはパスワードが違います"
 
-    user = users[username]
+    user = res.data[0]
 
     if user.get("locked"):
         return False, "アカウントがロックされています。管理者にお問い合わせください。"
 
     if user["password"] == _hash_password(password):
-        user["failed_attempts"] = 0
-        _save_users(users)
+        client.table("users").update({"failed_attempts": 0}).eq("username", username).execute()
         return True, None
     else:
-        user["failed_attempts"] = user.get("failed_attempts", 0) + 1
-        if user["failed_attempts"] >= 3:
-            user["locked"] = True
-            _save_users(users)
+        failed_attempts = user.get("failed_attempts", 0) + 1
+        if failed_attempts >= 3:
+            client.table("users").update(
+                {"failed_attempts": failed_attempts, "locked": True}
+            ).eq("username", username).execute()
             return False, "パスワードを3回間違えました。アカウントがロックされました。管理者にお問い合わせください。"
-        remaining = 3 - user["failed_attempts"]
-        _save_users(users)
+        client.table("users").update({"failed_attempts": failed_attempts}).eq("username", username).execute()
+        remaining = 3 - failed_attempts
         return False, f"パスワードが違います（あと {remaining} 回間違えるとロック）"
+
+
+def list_users() -> dict:
+    """管理者用：全ユーザーの状態を返す。"""
+    res = get_client().table("users").select("username, failed_attempts, locked").execute()
+    return {
+        r["username"]: {"failed_attempts": r.get("failed_attempts", 0), "locked": r.get("locked", False)}
+        for r in res.data
+    }
 
 
 # ── ブラウザリロードでのセッション継続 ──────────────────────────
 # st.session_state はブラウザとの接続（WebSocket）に紐づいており、
 # ページをリロードすると新しいセッションになって失われる。
 # そこでログイン時にトークンを発行してURL（st.query_params）に載せ、
-# サーバー側 sessions.json と突き合わせて「30分以内の活動なら復元する」。
-
-def _load_sessions() -> dict:
-    if not os.path.exists(SESSIONS_FILE):
-        return {}
-    with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _save_sessions(sessions: dict):
-    with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
-        json.dump(sessions, f, ensure_ascii=False, indent=2)
-
+# サーバー側 sessions テーブルと突き合わせて「30分以内の活動なら復元する」。
 
 def create_session(username: str) -> str:
     """ログイン成功時にセッショントークンを発行し、サーバー側に記録する。
     あわせて長期間活動のない古いレコード（24時間超）を掃除し、肥大化を防ぐ。"""
+    client = get_client()
     token = secrets.token_urlsafe(32)
-    sessions = _load_sessions()
     now = time.time()
-    sessions = {k: v for k, v in sessions.items()
-                if now - v.get("last_activity", 0) <= 24 * 60 * 60}
-    sessions[token] = {"username": username, "last_activity": now}
-    _save_sessions(sessions)
+    client.table("sessions").delete().lt("last_activity", now - 24 * 60 * 60).execute()
+    client.table("sessions").insert({
+        "token": token, "username": username, "last_activity": now,
+    }).execute()
     return token
 
 
@@ -114,13 +99,13 @@ def resume_session(token: str, max_idle: int) -> str | None:
     期限切れ・不正なトークンの場合はNoneを返し、レコードを削除する。"""
     if not token:
         return None
-    sessions = _load_sessions()
-    s = sessions.get(token)
-    if not s:
+    client = get_client()
+    res = client.table("sessions").select("*").eq("token", token).execute()
+    if not res.data:
         return None
+    s = res.data[0]
     if time.time() - s.get("last_activity", 0) > max_idle:
-        sessions.pop(token, None)
-        _save_sessions(sessions)
+        client.table("sessions").delete().eq("token", token).execute()
         return None
     return s["username"]
 
@@ -130,31 +115,27 @@ def touch_session(token: str, min_interval: int = 60):
     毎回の再描画で書き込むとI/Oが増えるため、min_interval秒以上経過時のみ書き込む。"""
     if not token:
         return
-    sessions = _load_sessions()
-    s = sessions.get(token)
-    if not s:
+    client = get_client()
+    res = client.table("sessions").select("last_activity").eq("token", token).execute()
+    if not res.data:
         return
     now = time.time()
-    if now - s.get("last_activity", 0) >= min_interval:
-        s["last_activity"] = now
-        _save_sessions(sessions)
+    if now - res.data[0].get("last_activity", 0) >= min_interval:
+        client.table("sessions").update({"last_activity": now}).eq("token", token).execute()
 
 
 def delete_session(token: str):
     """ログアウト・タイムアウト時にセッションレコードを削除する。"""
     if not token:
         return
-    sessions = _load_sessions()
-    if sessions.pop(token, None) is not None:
-        _save_sessions(sessions)
+    get_client().table("sessions").delete().eq("token", token).execute()
 
 
 def unlock_user(username: str) -> bool:
     """管理者用：アカウントのロックを解除する。"""
-    users = _load_users()
-    if username not in users:
+    client = get_client()
+    existing = client.table("users").select("username").eq("username", username).execute()
+    if not existing.data:
         return False
-    users[username]["locked"] = False
-    users[username]["failed_attempts"] = 0
-    _save_users(users)
+    client.table("users").update({"locked": False, "failed_attempts": 0}).eq("username", username).execute()
     return True
